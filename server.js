@@ -686,8 +686,8 @@ app.post("/commandes/:id/payer", async (req, res) => {
         metadata: {
           order_id: commande._id.toString(),
         },
-        success_url: "http://127.0.0.1:5500/suivi-commande.html",
-        error_url: "http://127.0.0.1:5500/panier.html",
+         success_url: "https://marvelous-dodol-c8532b.netlify.app/suivi-commande.html",
+        error_url: "https://marvelous-dodol-c8532b.netlify.app/panier.html",
       }),
     });
 
