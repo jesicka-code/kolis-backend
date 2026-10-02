@@ -45,7 +45,7 @@ function calculerDistanceKm(lat1, lon1, lat2, lon2) {
 }
 
 const FRAIS_BASE = 300;
-const TARIF_PAR_KM = 200;
+const TARIF_PAR_KM = 100;
 
 function calculerFraisLivraison(distanceKm) {
   return Math.round(FRAIS_BASE + TARIF_PAR_KM * distanceKm);
@@ -686,8 +686,8 @@ app.post("/commandes/:id/payer", async (req, res) => {
         metadata: {
           order_id: commande._id.toString(),
         },
-         success_url: "https://marvelous-dodol-c8532b.netlify.app/suivi-commande.html",
-        error_url: "https://marvelous-dodol-c8532b.netlify.app/panier.html",
+         success_url: "https://kolis-yamoussoukro.netlify.app/suivi-commande.html",
+        error_url: "https://kolis-yamoussoukro.netlify.app/panier.html",
       }),
     });
 
