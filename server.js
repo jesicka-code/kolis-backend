@@ -10,6 +10,7 @@ const { MongoClient, ObjectId } = require("mongodb");
 const app = express();
 app.use(cors());
 app.use(express.json({
+  limit: "5mb",
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
   }
@@ -124,7 +125,7 @@ app.get("/produits", async (req, res) => {
 
 app.post("/produits", async (req, res) => {
   try {
-    const { commerceNom, nom, categorie, unite, prix } = req.body;
+    const { commerceNom, nom, categorie, unite, prix, photo } = req.body;
 
     if (!commerceNom || !nom || !unite || !prix) {
       return res.status(400).json({ erreur: "commerceNom, nom, unite et prix sont obligatoires." });
@@ -134,6 +135,7 @@ app.post("/produits", async (req, res) => {
       commerceNom, nom,
       categorie: categorie || "epicerie",
       unite, prix: parseInt(prix, 10),
+      photo: photo || null,
       disponible: true,
     };
 
@@ -142,7 +144,7 @@ app.post("/produits", async (req, res) => {
   } catch (error) {
     res.status(500).json({ erreur: "Impossible d'ajouter le produit" });
   }
-});
+})
 
 app.patch("/produits/:id", async (req, res) => {
   try {
