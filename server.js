@@ -769,7 +769,56 @@ app.post("/webhooks/geniuspay", async (req, res) => {
     res.status(500).json({ erreur: "Erreur serveur" });
   }
 });
+// ---------- Messages du service client ----------
 
+app.post("/contact", async (req, res) => {
+  try {
+    const { nom, telephone, email, sujet, message } = req.body;
+
+    if (!nom || !telephone || !message) {
+      return res.status(400).json({ erreur: "Nom, téléphone et message sont obligatoires." });
+    }
+
+    const nouveauMessage = {
+      nom, telephone,
+      email: email || "",
+      sujet: sujet || "Question générale",
+      message,
+      statut: "non_lu",
+      dateCreation: new Date(),
+    };
+
+    const resultat = await db.collection("messages_contact").insertOne(nouveauMessage);
+    res.status(201).json({ message: "Message envoyé", messageId: resultat.insertedId });
+  } catch (error) {
+    console.error("Erreur lors de l'envoi du message :", error);
+    res.status(500).json({ erreur: "Impossible d'envoyer le message" });
+  }
+});
+
+app.get("/contact", async (req, res) => {
+  try {
+    const messages = await db.collection("messages_contact")
+      .find()
+      .sort({ dateCreation: -1 })
+      .toArray();
+    res.json(messages);
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de récupérer les messages" });
+  }
+});
+
+app.patch("/contact/:id/marquer-traite", async (req, res) => {
+  try {
+    await db.collection("messages_contact").updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { statut: "traite" } }
+    );
+    res.json({ message: "Message marqué comme traité" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de mettre à jour le message" });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Serveur Kolis démarré sur http://localhost:${PORT}`);
