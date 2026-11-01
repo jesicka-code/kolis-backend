@@ -819,6 +819,20 @@ app.patch("/contact/:id/marquer-traite", async (req, res) => {
     res.status(500).json({ erreur: "Impossible de mettre à jour le message" });
   }
 });
+// ---------- Suivi GPS en direct du livreur ----------
+
+app.patch("/commandes/:id/position-livreur", async (req, res) => {
+  try {
+    const { lat, lon } = req.body;
+    await db.collection("commandes").updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { positionLivreurActuelle: { lat: parseFloat(lat), lon: parseFloat(lon) }, dernierePositionMaj: new Date() } }
+    );
+    res.json({ message: "Position mise à jour" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de mettre à jour la position" });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Serveur Kolis démarré sur http://localhost:${PORT}`);
