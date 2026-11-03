@@ -26,6 +26,19 @@ async function connectToDatabase() {
     await client.connect();
     db = client.db("kolis");
     console.log("✅ Connecté à MongoDB avec succès !");
+
+    try {
+      // Empêche deux commerces d'être créés pour la même candidature
+      await db.collection("commerces").createIndex(
+        { candidatureId: 1 },
+        { unique: true, partialFilterExpression: { candidatureId: { $exists: true } } }
+      );
+
+      // Rattrape les candidatures déjà validées avant cette correction
+      await synchroniserCommercesValides();
+    } catch (erreurSync) {
+      console.error("⚠️ Synchronisation des commerces validés impossible :", erreurSync);
+    }
   } catch (error) {
     console.error("❌ Erreur de connexion à MongoDB :", error);
   }
@@ -616,7 +629,60 @@ app.patch("/candidatures/livreurs/:id", async (req, res) => {
     res.status(500).json({ erreur: "Impossible de mettre à jour la candidature" });
   }
 });
+// ---------- Création d'un commerce à partir d'une candidature validée ----------
 
+async function creerCommerceDepuisCandidature(candidature) {
+  const commerces = db.collection("commerces");
+
+  // Déjà créé pour cette candidature : on ne fait rien
+  const dejaCree = await commerces.findOne({ candidatureId: candidature._id });
+  if (dejaCree) return { cree: false, commerce: dejaCree };
+
+  const nom = String(candidature.nomCommerce || "").trim();
+  if (!nom) throw new Error("Candidature sans nom de commerce");
+
+  // Un commerce du même nom existe déjà (sans tenir compte des majuscules) : pas de doublon
+  const memeNom = await commerces.findOne({ nom: nom }, { collation: { locale: "fr", strength: 2 } });
+  if (memeNom) return { cree: false, commerce: memeNom };
+
+  const nouveauCommerce = {
+    nom: nom,
+    categorie: String(candidature.categorie || "autre").trim(),
+    adresse: candidature.adresse || "",
+    responsable: candidature.responsable || "",
+    telephone: candidature.telephone || "",
+    note: 0,
+    nombreAvis: 0,
+    fraisLivraison: FRAIS_BASE,
+    dureeLivraison: "30-45 min",
+    ouvert: true,
+    candidatureId: candidature._id,
+    dateCreation: new Date(),
+  };
+
+  try {
+    await commerces.insertOne(nouveauCommerce);
+    return { cree: true, commerce: nouveauCommerce };
+  } catch (erreur) {
+    // Deux validations simultanées : l'index unique bloque la seconde
+    if (erreur && erreur.code === 11000) {
+      return { cree: false, commerce: null };
+    }
+    throw erreur;
+  }
+}
+
+async function synchroniserCommercesValides() {
+  const validees = await db.collection("candidatures_commerces").find({ statut: "valide" }).toArray();
+  let crees = 0;
+  for (const candidature of validees) {
+    const resultat = await creerCommerceDepuisCandidature(candidature);
+    if (resultat.cree) crees++;
+  }
+  if (crees > 0) {
+    console.log("✅ " + crees + " commerce(s) validé(s) ajouté(s) à la liste des commerces");
+  }
+}
 // ---------- Candidatures commerces (partenaires) ----------
 app.post("/candidatures/commerces", async (req, res) => {
   try {
@@ -652,12 +718,26 @@ app.get("/candidatures/commerces", async (req, res) => {
 app.patch("/candidatures/commerces/:id", async (req, res) => {
   try {
     const { statut } = req.body;
-    await db.collection("candidatures_commerces").updateOne(
-      { _id: new ObjectId(req.params.id) },
-      { $set: { statut } }
-    );
-    res.json({ message: "Demande mise à jour" });
+    if (statut !== "valide" && statut !== "refuse") {
+      return res.status(400).json({ erreur: "Le statut doit être 'valide' ou 'refuse'." });
+    }
+
+    const candidatures = db.collection("candidatures_commerces");
+    const candidature = await candidatures.findOne({ _id: new ObjectId(req.params.id) });
+    if (!candidature) {
+      return res.status(404).json({ erreur: "Candidature introuvable" });
+    }
+
+    let commerceCree = false;
+    if (statut === "valide") {
+      const resultat = await creerCommerceDepuisCandidature(candidature);
+      commerceCree = resultat.cree;
+    }
+
+    await candidatures.updateOne({ _id: candidature._id }, { $set: { statut } });
+    res.json({ message: "Demande mise à jour", commerceCree });
   } catch (error) {
+    console.error("Erreur validation candidature commerce :", error);
     res.status(500).json({ erreur: "Impossible de mettre à jour la demande" });
   }
 });
