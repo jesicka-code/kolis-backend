@@ -631,6 +631,11 @@ app.patch("/candidatures/livreurs/:id", async (req, res) => {
 });
 // ---------- Création d'un commerce à partir d'une candidature validée ----------
 
+// Retire les caractères < et > d'un texte saisi par un visiteur (empêche d'injecter du code dans les pages)
+function nettoyerTexte(valeur) {
+  return String(valeur || "").replace(/[<>]/g, "").trim();
+}
+
 async function creerCommerceDepuisCandidature(candidature) {
   const commerces = db.collection("commerces");
 
@@ -638,7 +643,7 @@ async function creerCommerceDepuisCandidature(candidature) {
   const dejaCree = await commerces.findOne({ candidatureId: candidature._id });
   if (dejaCree) return { cree: false, commerce: dejaCree };
 
-  const nom = String(candidature.nomCommerce || "").trim();
+  const nom = nettoyerTexte(candidature.nomCommerce);
   if (!nom) throw new Error("Candidature sans nom de commerce");
 
   // Un commerce du même nom existe déjà (sans tenir compte des majuscules) : pas de doublon
@@ -647,10 +652,10 @@ async function creerCommerceDepuisCandidature(candidature) {
 
   const nouveauCommerce = {
     nom: nom,
-    categorie: String(candidature.categorie || "autre").trim(),
-    adresse: candidature.adresse || "",
-    responsable: candidature.responsable || "",
-    telephone: candidature.telephone || "",
+    categorie: nettoyerTexte(candidature.categorie) || "autre",
+    adresse: nettoyerTexte(candidature.adresse),
+    responsable: nettoyerTexte(candidature.responsable),
+    telephone: nettoyerTexte(candidature.telephone),
     note: 0,
     nombreAvis: 0,
     fraisLivraison: FRAIS_BASE,
@@ -676,8 +681,12 @@ async function synchroniserCommercesValides() {
   const validees = await db.collection("candidatures_commerces").find({ statut: "valide" }).toArray();
   let crees = 0;
   for (const candidature of validees) {
-    const resultat = await creerCommerceDepuisCandidature(candidature);
-    if (resultat.cree) crees++;
+    try {
+      const resultat = await creerCommerceDepuisCandidature(candidature);
+      if (resultat.cree) crees++;
+    } catch (erreur) {
+      console.error("⚠️ Candidature ignorée (" + candidature._id + ") :", erreur.message);
+    }
   }
   if (crees > 0) {
     console.log("✅ " + crees + " commerce(s) validé(s) ajouté(s) à la liste des commerces");
@@ -911,6 +920,44 @@ app.patch("/commandes/:id/position-livreur", async (req, res) => {
     res.json({ message: "Position mise à jour" });
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de mettre à jour la position" });
+  }
+});
+// ---------- Protection des actions réservées à l'administrateur ----------
+
+const ADMIN_KEY = process.env.ADMIN_KEY;
+
+function verifierAdmin(req, res, next) {
+  const cle = req.headers["x-admin-key"];
+  if (!ADMIN_KEY || cle !== ADMIN_KEY) {
+    return res.status(401).json({ erreur: "Accès administrateur refusé" });
+  }
+  next();
+}
+
+// Retire un commerce de Kolis (réservé à l'administrateur)
+app.delete("/commerces/:id", verifierAdmin, async (req, res) => {
+  try {
+    const commerces = db.collection("commerces");
+    const commerce = await commerces.findOne({ _id: new ObjectId(req.params.id) });
+    if (!commerce) {
+      return res.status(404).json({ erreur: "Commerce introuvable" });
+    }
+
+    // La candidature passe à "retire" : sans ça, le commerce serait recréé au prochain démarrage
+    if (commerce.candidatureId) {
+      await db.collection("candidatures_commerces").updateOne(
+        { _id: commerce.candidatureId },
+        { $set: { statut: "retire" } }
+      );
+    }
+
+    const produits = await db.collection("produits").deleteMany({ commerceNom: commerce.nom });
+    await commerces.deleteOne({ _id: commerce._id });
+
+    res.json({ message: "Commerce retiré", produitsSupprimes: produits.deletedCount });
+  } catch (error) {
+    console.error("Erreur lors du retrait du commerce :", error);
+    res.status(500).json({ erreur: "Impossible de retirer le commerce" });
   }
 });
 const PORT = process.env.PORT || 3000;
