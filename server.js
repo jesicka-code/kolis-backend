@@ -252,22 +252,29 @@ app.get("/calculer-livraison", (req, res) => {
 });
 
 // ---------- Commandes ----------
-app.post("/commandes", async (req, res) => {
+ app.post("/commandes", async (req, res) => {
   try {
-    const { commerceId, commerceNom, articles, latCommerce, lonCommerce, latClient, lonClient, adresseLivraison, modePaiement, montantRemis } = req.body;
+    const { commerceId, commerceNom, articles, latClient, lonClient, adresseLivraison, modePaiement, montantRemis } = req.body;
 
     if (!articles || articles.length === 0) {
       return res.status(400).json({ erreur: "La commande doit contenir au moins un article." });
     }
 
+    // La position du commerce vient de la base de données, jamais du navigateur
+    const commerce = await db.collection("commerces").findOne({ nom: commerceNom });
+    if (!commerce || typeof commerce.latitude !== "number" || typeof commerce.longitude !== "number") {
+      return res.status(400).json({ erreur: "La position de ce commerce n'est pas encore enregistrée." });
+    }
+
+    const latitudeClient = lireCoordonnee(latClient, -90, 90);
+    const longitudeClient = lireCoordonnee(lonClient, -180, 180);
+    if (latitudeClient === null || longitudeClient === null) {
+      return res.status(400).json({ erreur: "La position de livraison est invalide." });
+    }
+
     const sousTotal = articles.reduce((total, article) => total + article.prix * article.quantite, 0);
 
-    const distance = calculerDistanceKm(
-      parseFloat(latCommerce),
-      parseFloat(lonCommerce),
-      parseFloat(latClient),
-      parseFloat(lonClient)
-    );
+    const distance = calculerDistanceKm(commerce.latitude, commerce.longitude, latitudeClient, longitudeClient);
     const fraisLivraison = calculerFraisLivraison(distance);
 
     const commissionKolis = Math.round(sousTotal * TAUX_COMMISSION);
@@ -286,10 +293,10 @@ app.post("/commandes", async (req, res) => {
       articles,
       adresseLivraison,
       modePaiement,
-      latCommerce: parseFloat(latCommerce),
-      lonCommerce: parseFloat(lonCommerce),
-      latClient: parseFloat(latClient),
-      lonClient: parseFloat(lonClient),
+      latCommerce: commerce.latitude,
+      lonCommerce: commerce.longitude,
+      latClient: latitudeClient,
+      lonClient: longitudeClient,
       distanceKm: Math.round(distance * 10) / 10,
       sousTotal,
       fraisLivraison,
@@ -315,20 +322,6 @@ app.post("/commandes", async (req, res) => {
   } catch (error) {
     console.error("Erreur lors de la création de la commande :", error);
     res.status(500).json({ erreur: "Impossible de créer la commande" });
-  }
-});
-
-app.get("/commandes", async (req, res) => {
-  try {
-    const { commerce } = req.query;
-    const filtre = commerce ? { commerceNom: commerce } : {};
-    const commandes = await db.collection("commandes")
-      .find(filtre)
-      .sort({ dateCreation: -1 })
-      .toArray();
-    res.json(commandes);
-  } catch (error) {
-    res.status(500).json({ erreur: "Impossible de récupérer les commandes" });
   }
 });
 
@@ -656,6 +649,8 @@ async function creerCommerceDepuisCandidature(candidature) {
     adresse: nettoyerTexte(candidature.adresse),
     responsable: nettoyerTexte(candidature.responsable),
     telephone: nettoyerTexte(candidature.telephone),
+    latitude: typeof candidature.latitude === "number" ? candidature.latitude : null,
+    longitude: typeof candidature.longitude === "number" ? candidature.longitude : null,
     note: 0,
     nombreAvis: 0,
     fraisLivraison: FRAIS_BASE,
@@ -693,16 +688,29 @@ async function synchroniserCommercesValides() {
   }
 }
 // ---------- Candidatures commerces (partenaires) ----------
+// Lit une coordonnée GPS envoyée par un visiteur : renvoie un nombre valide ou null
+function lireCoordonnee(valeur, min, max) {
+  const nombre = parseFloat(valeur);
+  return Number.isFinite(nombre) && nombre >= min && nombre <= max ? nombre : null;
+}
 app.post("/candidatures/commerces", async (req, res) => {
   try {
-    const { nomCommerce, categorie, adresse, responsable, telephone } = req.body;
+    const { nomCommerce, categorie, adresse, responsable, telephone, latitude, longitude } = req.body;
 
     if (!nomCommerce || !categorie || !adresse || !responsable || !telephone) {
       return res.status(400).json({ erreur: "Tous les champs obligatoires doivent être remplis." });
     }
 
+    const latitudeValide = lireCoordonnee(latitude, -90, 90);
+    const longitudeValide = lireCoordonnee(longitude, -180, 180);
+    if (latitudeValide === null || longitudeValide === null) {
+      return res.status(400).json({ erreur: "La position GPS du commerce est obligatoire." });
+    }
+
     const candidature = {
       nomCommerce, categorie, adresse, responsable, telephone,
+      latitude: latitudeValide,
+      longitude: longitudeValide,
       statut: "attente",
       dateCreation: new Date(),
     };
@@ -712,42 +720,6 @@ app.post("/candidatures/commerces", async (req, res) => {
   } catch (error) {
     console.error("Erreur candidature commerce :", error);
     res.status(500).json({ erreur: "Impossible d'envoyer la demande" });
-  }
-});
-
-app.get("/candidatures/commerces", async (req, res) => {
-  try {
-    const candidatures = await db.collection("candidatures_commerces").find({ statut: "attente" }).toArray();
-    res.json(candidatures);
-  } catch (error) {
-    res.status(500).json({ erreur: "Impossible de récupérer les demandes" });
-  }
-});
-
-app.patch("/candidatures/commerces/:id", async (req, res) => {
-  try {
-    const { statut } = req.body;
-    if (statut !== "valide" && statut !== "refuse") {
-      return res.status(400).json({ erreur: "Le statut doit être 'valide' ou 'refuse'." });
-    }
-
-    const candidatures = db.collection("candidatures_commerces");
-    const candidature = await candidatures.findOne({ _id: new ObjectId(req.params.id) });
-    if (!candidature) {
-      return res.status(404).json({ erreur: "Candidature introuvable" });
-    }
-
-    let commerceCree = false;
-    if (statut === "valide") {
-      const resultat = await creerCommerceDepuisCandidature(candidature);
-      commerceCree = resultat.cree;
-    }
-
-    await candidatures.updateOne({ _id: candidature._id }, { $set: { statut } });
-    res.json({ message: "Demande mise à jour", commerceCree });
-  } catch (error) {
-    console.error("Erreur validation candidature commerce :", error);
-    res.status(500).json({ erreur: "Impossible de mettre à jour la demande" });
   }
 });
 
