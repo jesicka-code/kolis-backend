@@ -6,7 +6,7 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const { MongoClient, ObjectId } = require("mongodb");
-
+const jwt = require("jsonwebtoken");
 const app = express();
 app.use(cors());
 app.use(express.json({
@@ -759,6 +759,58 @@ app.patch("/candidatures/commerces/:id", async (req, res) => {
     res.status(500).json({ erreur: "Impossible de mettre à jour la candidature" });
   }
 });
+// ---------- Connexion des commerces ----------
+app.post("/commerce/connexion", async (req, res) => {
+  try {
+    const { telephone, motDePasse } = req.body;
+
+    if (!telephone || !motDePasse) {
+      return res.status(400).json({ erreur: "Téléphone et mot de passe sont obligatoires." });
+    }
+
+    const candidature = await db.collection("candidatures_commerces").findOne({ telephone: telephone.trim() });
+    if (!candidature || !candidature.motDePasse) {
+      return res.status(401).json({ erreur: "Téléphone ou mot de passe incorrect." });
+    }
+
+    const motDePasseValide = await bcrypt.compare(motDePasse, candidature.motDePasse);
+    if (!motDePasseValide) {
+      return res.status(401).json({ erreur: "Téléphone ou mot de passe incorrect." });
+    }
+
+    if (candidature.statut !== "valide") {
+      return res.status(403).json({ erreur: "Ta candidature n'est pas encore validée par Kolis." });
+    }
+
+    const commerce = await db.collection("commerces").findOne({ candidatureId: candidature._id });
+    if (!commerce) {
+      return res.status(404).json({ erreur: "Commerce introuvable. Contacte Kolis." });
+    }
+
+    const token = jwt.sign(
+      { commerceId: commerce._id.toString() },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.json({ message: "Connexion réussie", token, commerceId: commerce._id, nom: commerce.nom });
+  } catch (error) {
+    console.error("Erreur connexion commerce :", error);
+    res.status(500).json({ erreur: "Impossible de se connecter" });
+  }
+});
+
+// Vérifie qu'un commerce est bien connecté (sera utilisé pour protéger ses produits)
+function verifierCommerce(req, res, next) {
+  const entete = req.headers.authorization || "";
+  const token = entete.replace("Bearer ", "");
+  try {
+    req.commerceId = jwt.verify(token, process.env.JWT_SECRET).commerceId;
+    next();
+  } catch (erreur) {
+    res.status(401).json({ erreur: "Connexion requise" });
+  }
+}
 // ---------- Paiement Mobile Money via GeniusPay ----------
 
 const GENIUSPAY_API_KEY = process.env.GENIUSPAY_API_KEY;
