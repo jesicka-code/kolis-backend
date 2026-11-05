@@ -136,18 +136,23 @@ app.get("/produits", async (req, res) => {
   }
 });
 
-app.post("/produits", async (req, res) => {
+// Un commerce connecté ajoute un produit (toujours pour LUI)
+app.post("/produits", verifierCommerce, async (req, res) => {
   try {
-    const { commerceNom, nom, categorie, unite, prix, photo } = req.body;
+    const commerce = await db.collection("commerces").findOne({ _id: new ObjectId(req.commerceId) });
+    if (!commerce) return res.status(404).json({ erreur: "Commerce introuvable" });
 
-    if (!commerceNom || !nom || !unite || !prix) {
-      return res.status(400).json({ erreur: "commerceNom, nom, unite et prix sont obligatoires." });
+    const { nom, categorie, unite, prix, photo } = req.body;
+    if (!nom || !unite || !prix) {
+      return res.status(400).json({ erreur: "nom, unite et prix sont obligatoires." });
     }
 
     const produit = {
-      commerceNom, nom,
+      commerceNom: commerce.nom,
+      nom: nettoyerTexte(nom),
       categorie: categorie || "epicerie",
-      unite, prix: parseInt(prix, 10),
+      unite: nettoyerTexte(unite),
+      prix: parseInt(prix, 10),
       photo: photo || null,
       disponible: true,
     };
@@ -157,27 +162,115 @@ app.post("/produits", async (req, res) => {
   } catch (error) {
     res.status(500).json({ erreur: "Impossible d'ajouter le produit" });
   }
-})
+});
 
-app.patch("/produits/:id", async (req, res) => {
+// Un commerce modifie SON produit (nom, prix, photo, disponibilité)
+app.patch("/produits/:id", verifierCommerce, async (req, res) => {
   try {
-    const { disponible } = req.body;
-    await db.collection("produits").updateOne(
-      { _id: new ObjectId(req.params.id) },
-      { $set: { disponible } }
+    const commerce = await db.collection("commerces").findOne({ _id: new ObjectId(req.commerceId) });
+    if (!commerce) return res.status(404).json({ erreur: "Commerce introuvable" });
+
+    const modifs = {};
+    if (req.body.disponible !== undefined) modifs.disponible = !!req.body.disponible;
+    if (req.body.nom) modifs.nom = nettoyerTexte(req.body.nom);
+    if (req.body.unite) modifs.unite = nettoyerTexte(req.body.unite);
+    if (req.body.prix) modifs.prix = parseInt(req.body.prix, 10);
+    if (req.body.photo) modifs.photo = req.body.photo;
+
+    const resultat = await db.collection("produits").updateOne(
+      { _id: new ObjectId(req.params.id), commerceNom: commerce.nom },
+      { $set: modifs }
     );
+    if (resultat.matchedCount === 0) {
+      return res.status(404).json({ erreur: "Produit introuvable" });
+    }
     res.json({ message: "Produit mis à jour" });
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de mettre à jour le produit" });
   }
 });
 
-app.delete("/produits/:id", async (req, res) => {
+// Un commerce supprime SON produit
+app.delete("/produits/:id", verifierCommerce, async (req, res) => {
   try {
-    await db.collection("produits").deleteOne({ _id: new ObjectId(req.params.id) });
+    const commerce = await db.collection("commerces").findOne({ _id: new ObjectId(req.commerceId) });
+    if (!commerce) return res.status(404).json({ erreur: "Commerce introuvable" });
+
+    const resultat = await db.collection("produits").deleteOne(
+      { _id: new ObjectId(req.params.id), commerceNom: commerce.nom }
+    );
+    if (resultat.deletedCount === 0) {
+      return res.status(404).json({ erreur: "Produit introuvable" });
+    }
     res.json({ message: "Produit supprimé" });
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de supprimer le produit" });
+  }
+});
+
+// Le commerce connecté lit et modifie sa propre fiche (photo, ouvert/fermé)
+app.get("/commerce/moi", verifierCommerce, async (req, res) => {
+  try {
+    const commerce = await db.collection("commerces").findOne({ _id: new ObjectId(req.commerceId) });
+    if (!commerce) return res.status(404).json({ erreur: "Commerce introuvable" });
+    res.json(commerce);
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de récupérer le commerce" });
+  }
+});
+
+app.patch("/commerce/moi", verifierCommerce, async (req, res) => {
+  try {
+    const modifs = {};
+    if (req.body.photo) modifs.photo = req.body.photo;
+    if (req.body.ouvert !== undefined) modifs.ouvert = !!req.body.ouvert;
+
+    await db.collection("commerces").updateOne(
+      { _id: new ObjectId(req.commerceId) },
+      { $set: modifs }
+    );
+    res.json({ message: "Fiche mise à jour" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de mettre à jour la fiche" });
+  }
+});
+// Les commandes du commerce connecté
+app.get("/commerce/commandes", verifierCommerce, async (req, res) => {
+  try {
+    const commerce = await db.collection("commerces").findOne({ _id: new ObjectId(req.commerceId) });
+    if (!commerce) return res.status(404).json({ erreur: "Commerce introuvable" });
+
+    const commandes = await db.collection("commandes")
+      .find({ commerceNom: commerce.nom })
+      .sort({ dateCreation: -1 })
+      .toArray();
+    res.json(commandes);
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de récupérer les commandes" });
+  }
+});
+
+// Le commerce accepte, refuse ou prépare SES commandes
+app.patch("/commerce/commandes/:id", verifierCommerce, async (req, res) => {
+  try {
+    const { statut } = req.body;
+    if (!["acceptee", "refusee", "preparation", "prete"].includes(statut)) {
+      return res.status(400).json({ erreur: "Statut non autorisé" });
+    }
+
+    const commerce = await db.collection("commerces").findOne({ _id: new ObjectId(req.commerceId) });
+    if (!commerce) return res.status(404).json({ erreur: "Commerce introuvable" });
+
+    const resultat = await db.collection("commandes").updateOne(
+      { _id: new ObjectId(req.params.id), commerceNom: commerce.nom },
+      { $set: { statut } }
+    );
+    if (resultat.matchedCount === 0) {
+      return res.status(404).json({ erreur: "Commande introuvable" });
+    }
+    res.json({ message: "Commande mise à jour" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de mettre à jour la commande" });
   }
 });
 
