@@ -695,12 +695,15 @@ function lireCoordonnee(valeur, min, max) {
 }
 app.post("/candidatures/commerces", async (req, res) => {
   try {
-    const { nomCommerce, categorie, adresse, responsable, telephone, latitude, longitude } = req.body;
+   const { nomCommerce, categorie, adresse, responsable, telephone, latitude, longitude, motdepasse } = req.body;
 
     if (!nomCommerce || !categorie || !adresse || !responsable || !telephone) {
       return res.status(400).json({ erreur: "Tous les champs obligatoires doivent être remplis." });
     }
-
+    if (!motdepasse || motdepasse.length < 6) {
+      return res.status(400).json({ erreur: "Le mot de passe doit avoir au moins 6 caractères." });
+    }
+    const motDePasseChiffre = await bcrypt.hash(motdepasse, 10);
     const latitudeValide = lireCoordonnee(latitude, -90, 90);
     const longitudeValide = lireCoordonnee(longitude, -180, 180);
     if (latitudeValide === null || longitudeValide === null) {
@@ -709,6 +712,7 @@ app.post("/candidatures/commerces", async (req, res) => {
 
     const candidature = {
       nomCommerce, categorie, adresse, responsable, telephone,
+      motDePasse: motDePasseChiffre,
       latitude: latitudeValide,
       longitude: longitudeValide,
       statut: "attente",
@@ -722,7 +726,39 @@ app.post("/candidatures/commerces", async (req, res) => {
     res.status(500).json({ erreur: "Impossible d'envoyer la demande" });
   }
 });
+// ---------- Admin : candidatures commerces ----------
+app.get("/candidatures/commerces", async (req, res) => {
+  try {
+    const candidatures = await db.collection("candidatures_commerces")
+      .find({ statut: "attente" }, { projection: { motDePasse: 0 } })
+      .toArray();
+    res.json(candidatures);
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de récupérer les candidatures" });
+  }
+});
 
+app.patch("/candidatures/commerces/:id", async (req, res) => {
+  try {
+    const { statut } = req.body;
+    const candidatures = db.collection("candidatures_commerces");
+
+    await candidatures.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { statut } }
+    );
+
+    if (statut === "valide") {
+      const candidature = await candidatures.findOne({ _id: new ObjectId(req.params.id) });
+      if (candidature) await creerCommerceDepuisCandidature(candidature);
+    }
+
+    res.json({ message: "Candidature mise à jour" });
+  } catch (error) {
+    console.error("Erreur validation commerce :", error);
+    res.status(500).json({ erreur: "Impossible de mettre à jour la candidature" });
+  }
+});
 // ---------- Paiement Mobile Money via GeniusPay ----------
 
 const GENIUSPAY_API_KEY = process.env.GENIUSPAY_API_KEY;
