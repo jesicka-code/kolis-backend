@@ -381,7 +381,7 @@ app.get("/calculer-livraison", (req, res) => {
 // ---------- Commandes ----------
  app.post("/commandes", async (req, res) => {
   try {
-    const { commerceId, commerceNom, articles, latClient, lonClient, adresseLivraison, modePaiement, montantRemis } = req.body;
+    let { commerceId, commerceNom, articles, latClient, lonClient, adresseLivraison, modePaiement, montantRemis } = req.body;
 
     if (!articles || articles.length === 0) {
       return res.status(400).json({ erreur: "La commande doit contenir au moins un article." });
@@ -399,7 +399,40 @@ app.get("/calculer-livraison", (req, res) => {
       return res.status(400).json({ erreur: "La position de livraison est invalide." });
     }
 
-    const sousTotal = articles.reduce((total, article) => total + article.prix * article.quantite, 0);
+       // Les prix viennent de la base de données, jamais du navigateur
+    if (!Array.isArray(articles) || articles.length > 50) {
+      return res.status(400).json({ erreur: "Panier invalide." });
+    }
+    if (commerce.ouvert === false) {
+      return res.status(400).json({ erreur: "Ce commerce est fermé pour le moment." });
+    }
+
+    const articlesVerifies = [];
+    for (const article of articles) {
+      if (!article || typeof article.nom !== "string") {
+        return res.status(400).json({ erreur: "Article invalide dans le panier." });
+      }
+      const quantite = parseInt(article.quantite, 10);
+      if (!Number.isInteger(quantite) || quantite < 1 || quantite > 50) {
+        return res.status(400).json({ erreur: "Quantité invalide pour « " + article.nom + " »." });
+      }
+
+      const produit = await db.collection("produits").findOne({
+        commerceNom: commerce.nom,
+        nom: article.nom,
+        disponible: { $ne: false },
+      });
+      if (!produit) {
+        return res.status(400).json({ erreur: "« " + article.nom + " » n'est plus disponible chez ce commerce." });
+      }
+
+      articlesVerifies.push({ ...article, nom: produit.nom, prix: produit.prix, quantite: quantite });
+    }
+    articles = articlesVerifies;
+
+    const sousTotal = articles.reduce((total, article) => total + article.prix * article.quantite, 0); 
+
+      
 
     const distance = calculerDistanceKm(commerce.latitude, commerce.longitude, latitudeClient, longitudeClient);
     const fraisLivraison = calculerFraisLivraison(distance);
