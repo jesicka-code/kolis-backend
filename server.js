@@ -15,6 +15,40 @@ app.use(express.json({
     req.rawBody = buf.toString();
   }
 }));
+// ---------- Routes réservées à l'administrateur ----------
+const ROUTES_ADMIN = [
+  ["GET", /^\/candidatures\/(livreurs|commerces)\/?$/],
+  ["PATCH", /^\/candidatures\/(livreurs|commerces)\/[^/]+\/?$/],
+  ["GET", /^\/livreurs\/soldes\/?$/],
+  ["PATCH", /^\/livreurs\/[^/]+\/reverser\/?$/],
+  ["GET", /^\/commerces\/soldes\/?$/],
+  ["PATCH", /^\/commerces\/[^/]+\/reverser\/?$/],
+  ["GET", /^\/commandes\/especes\/?$/],
+  ["GET", /^\/contact\/?$/],
+  ["PATCH", /^\/contact\/[^/]+\/marquer-traite\/?$/],
+];
+
+// Anciennes routes remplacées par les routes protégées des commerces et des livreurs
+const ROUTES_BLOQUEES = [
+  ["GET", /^\/commandes\/disponibles\/?$/],
+  ["PATCH", /^\/commandes\/[^/]+\/?$/],
+  ["PATCH", /^\/commandes\/[^/]+\/paiement-recu\/?$/],
+  ["PATCH", /^\/commandes\/[^/]+\/position-livreur\/?$/],
+  ["PATCH", /^\/commerces\/[^/]+\/statut\/?$/],
+];
+
+app.use(function (req, res, next) {
+  const correspond = function (liste) {
+    return liste.some(function (r) { return r[0] === req.method && r[1].test(req.path); });
+  };
+  if (correspond(ROUTES_BLOQUEES)) {
+    return res.status(410).json({ erreur: "Cette route n'existe plus" });
+  }
+  if (correspond(ROUTES_ADMIN)) {
+    return verifierAdmin(req, res, next);
+  }
+  next();
+});
 
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -674,14 +708,31 @@ app.post("/connexion", async (req, res) => {
 // ---------- Candidatures livreurs ----------
 app.post("/candidatures/livreurs", async (req, res) => {
   try {
-    const { nom, telephone, vehicule } = req.body;
+    const { nom, telephone, vehicule, motdepasse } = req.body;
 
     if (!nom || !telephone || !vehicule) {
       return res.status(400).json({ erreur: "Nom, téléphone et véhicule sont obligatoires." });
     }
+    if (!motdepasse || motdepasse.length < 6) {
+      return res.status(400).json({ erreur: "Le mot de passe doit avoir au moins 6 caractères." });
+    }
+
+    const tel = nettoyerTexte(telephone);
+    const dejaInscrit = await db.collection("candidatures_livreurs").findOne({
+      telephone: tel,
+      statut: { $ne: "refuse" },
+    });
+    if (dejaInscrit) {
+      return res.status(409).json({ erreur: "Une candidature existe déjà avec ce numéro de téléphone." });
+    }
+
+    const motDePasseChiffre = await bcrypt.hash(motdepasse, 10);
 
     const candidature = {
-      nom, telephone, vehicule,
+      nom: nettoyerTexte(nom),
+      telephone: tel,
+      vehicule: nettoyerTexte(vehicule),
+      motDePasse: motDePasseChiffre,
       statut: "attente",
       dateCreation: new Date(),
     };
@@ -696,7 +747,7 @@ app.post("/candidatures/livreurs", async (req, res) => {
 
 app.get("/candidatures/livreurs", async (req, res) => {
   try {
-    const candidatures = await db.collection("candidatures_livreurs").find({ statut: "attente" }).toArray();
+    const candidatures = await db.collection("candidatures_livreurs").find({ statut: "attente" }, { projection: { motDePasse: 0 } }).toArray()
     res.json(candidatures);
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de récupérer les candidatures" });
@@ -904,6 +955,176 @@ function verifierCommerce(req, res, next) {
     res.status(401).json({ erreur: "Connexion requise" });
   }
 }
+// ---------- Connexion des livreurs ----------
+app.post("/livreur/connexion", async (req, res) => {
+  try {
+    const { telephone, motDePasse } = req.body;
+
+    if (!telephone || !motDePasse) {
+      return res.status(400).json({ erreur: "Téléphone et mot de passe sont obligatoires." });
+    }
+
+    const livreur = await db.collection("candidatures_livreurs").findOne({
+      telephone: nettoyerTexte(telephone),
+      statut: { $ne: "refuse" },
+    });
+    if (!livreur || !livreur.motDePasse) {
+      return res.status(401).json({ erreur: "Téléphone ou mot de passe incorrect." });
+    }
+
+    const motDePasseValide = await bcrypt.compare(motDePasse, livreur.motDePasse);
+    if (!motDePasseValide) {
+      return res.status(401).json({ erreur: "Téléphone ou mot de passe incorrect." });
+    }
+
+    if (livreur.statut !== "valide") {
+      return res.status(403).json({ erreur: "Ton dossier n'est pas encore validé par Kolis." });
+    }
+
+    const token = jwt.sign(
+      { livreurId: livreur._id.toString() },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.json({ message: "Connexion réussie", token, nom: livreur.nom });
+  } catch (error) {
+    console.error("Erreur connexion livreur :", error);
+    res.status(500).json({ erreur: "Impossible de se connecter" });
+  }
+});
+
+// Vérifie qu'un livreur est bien connecté (sert à l'étape suivante)
+function verifierLivreur(req, res, next) {
+  const entete = req.headers.authorization || "";
+  const token = entete.replace("Bearer ", "");
+  try {
+    const donnees = jwt.verify(token, process.env.JWT_SECRET);
+    if (!donnees.livreurId) throw new Error("Jeton non livreur");
+    req.livreurId = donnees.livreurId;
+    next();
+  } catch (erreur) {
+    res.status(401).json({ erreur: "Connexion requise" });
+  }
+}
+// ---------- Espace livreur (routes protégées) ----------
+async function trouverLivreur(req) {
+  return db.collection("candidatures_livreurs").findOne({
+    _id: new ObjectId(req.livreurId),
+    statut: "valide",
+  });
+}
+
+// Commandes prêtes à être récupérées
+app.get("/livreur/commandes-disponibles", verifierLivreur, async (req, res) => {
+  try {
+    const livreur = await trouverLivreur(req);
+    if (!livreur) return res.status(401).json({ erreur: "Connexion requise" });
+
+    const commandes = await db.collection("commandes").find({ statut: "prete" }).toArray();
+    res.json(commandes);
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de récupérer les commandes" });
+  }
+});
+
+// Livraisons faites et gains du livreur connecté
+app.get("/livreur/stats", verifierLivreur, async (req, res) => {
+  try {
+    const livreur = await trouverLivreur(req);
+    if (!livreur) return res.status(401).json({ erreur: "Connexion requise" });
+
+    const livrees = await db.collection("commandes")
+      .find({ livreurId: livreur._id, statut: "livree" })
+      .toArray();
+    const gains = livrees.reduce(function (total, c) { return total + (c.fraisLivraison || 0); }, 0);
+    res.json({ livraisons: livrees.length, gains: gains });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de calculer les statistiques" });
+  }
+});
+
+// Le livreur fait avancer SA commande d'une étape
+const ETAPE_PRECEDENTE = {
+  recuperee: "prete",
+  en_livraison: "recuperee",
+  arrivee: "en_livraison",
+  livree: "arrivee",
+};
+
+app.patch("/livreur/commandes/:id/etape", verifierLivreur, async (req, res) => {
+  try {
+    const livreur = await trouverLivreur(req);
+    if (!livreur) return res.status(401).json({ erreur: "Connexion requise" });
+
+    const { statut } = req.body;
+    const precedente = ETAPE_PRECEDENTE[statut];
+    if (!precedente) {
+      return res.status(400).json({ erreur: "Étape non autorisée" });
+    }
+
+    let filtre, modifs;
+    if (statut === "recuperee") {
+      // Première étape : le livreur prend la commande (une seule personne peut la prendre)
+      filtre = { _id: new ObjectId(req.params.id), statut: "prete" };
+      modifs = { statut: statut, livreurId: livreur._id, livreurNom: livreur.nom };
+    } else {
+      filtre = { _id: new ObjectId(req.params.id), statut: precedente, livreurId: livreur._id };
+      modifs = { statut: statut };
+      if (statut === "livree") modifs.dateLivraison = new Date();
+    }
+
+    const resultat = await db.collection("commandes").updateOne(filtre, { $set: modifs });
+    if (resultat.matchedCount === 0) {
+      return res.status(409).json({ erreur: "Cette commande n'est plus disponible ou a déjà été prise." });
+    }
+    res.json({ message: "Commande mise à jour" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de mettre à jour la commande" });
+  }
+});
+
+// Position GPS en direct (seulement pour SA commande)
+app.patch("/livreur/commandes/:id/position", verifierLivreur, async (req, res) => {
+  try {
+    const livreur = await trouverLivreur(req);
+    if (!livreur) return res.status(401).json({ erreur: "Connexion requise" });
+
+    const lat = lireCoordonnee(req.body.lat, -90, 90);
+    const lon = lireCoordonnee(req.body.lon, -180, 180);
+    if (lat === null || lon === null) {
+      return res.status(400).json({ erreur: "Position invalide" });
+    }
+
+    await db.collection("commandes").updateOne(
+      { _id: new ObjectId(req.params.id), livreurId: livreur._id },
+      { $set: { positionLivreurActuelle: { lat: lat, lon: lon }, dernierePositionMaj: new Date() } }
+    );
+    res.json({ message: "Position mise à jour" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de mettre à jour la position" });
+  }
+});
+
+// Paiement en espèces reçu (seulement pour SA commande payée en espèces)
+app.patch("/livreur/commandes/:id/paiement-recu", verifierLivreur, async (req, res) => {
+  try {
+    const livreur = await trouverLivreur(req);
+    if (!livreur) return res.status(401).json({ erreur: "Connexion requise" });
+
+    const resultat = await db.collection("commandes").updateOne(
+      { _id: new ObjectId(req.params.id), livreurId: livreur._id, modePaiement: "especes" },
+      { $set: { paiementStatut: "paye", datePaiement: new Date() } }
+    );
+    if (resultat.matchedCount === 0) {
+      return res.status(404).json({ erreur: "Commande introuvable" });
+    }
+    res.json({ message: "Paiement confirmé" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de confirmer le paiement" });
+  }
+});
+
 // ---------- Paiement Mobile Money via GeniusPay ----------
 
 const GENIUSPAY_API_KEY = process.env.GENIUSPAY_API_KEY;
