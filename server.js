@@ -741,7 +741,7 @@ app.post("/connexion", async (req, res) => {
 // ---------- Candidatures livreurs ----------
 app.post("/candidatures/livreurs", async (req, res) => {
   try {
-    const { nom, telephone, vehicule, motdepasse } = req.body;
+   const { nom, telephone, vehicule, motdepasse, pieceIdentite, selfie } = req.body;
 
     if (!nom || !telephone || !vehicule) {
       return res.status(400).json({ erreur: "Nom, téléphone et véhicule sont obligatoires." });
@@ -751,6 +751,12 @@ app.post("/candidatures/livreurs", async (req, res) => {
     }
 
     const tel = nettoyerTexte(telephone);
+    const imageValide = function (v) {
+      return typeof v === "string" && v.indexOf("data:image/jpeg;base64,") === 0 && v.length < 700000;
+    };
+    if (!imageValide(pieceIdentite) || !imageValide(selfie)) {
+      return res.status(400).json({ erreur: "La photo de la pièce d'identité et le selfie sont obligatoires." });
+    }
     const dejaInscrit = await db.collection("candidatures_livreurs").findOne({
       telephone: tel,
       statut: { $ne: "refuse" },
@@ -771,6 +777,12 @@ app.post("/candidatures/livreurs", async (req, res) => {
     };
 
     const resultat = await db.collection("candidatures_livreurs").insertOne(candidature);
+    await db.collection("documents_livreurs").insertOne({
+      candidatureId: resultat.insertedId,
+      pieceIdentite: pieceIdentite,
+      selfie: selfie,
+      dateCreation: new Date(),
+    });
     res.status(201).json({ message: "Candidature envoyée", candidatureId: resultat.insertedId });
   } catch (error) {
     console.error("Erreur candidature livreur :", error);
@@ -1155,6 +1167,16 @@ app.patch("/livreur/commandes/:id/paiement-recu", verifierLivreur, async (req, r
     res.json({ message: "Paiement confirmé" });
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de confirmer le paiement" });
+  }
+});
+// Documents d'un livreur (réservé à l'administrateur)
+app.get("/candidatures/livreurs/:id/documents", verifierAdmin, async (req, res) => {
+  try {
+    const docs = await db.collection("documents_livreurs").findOne({ candidatureId: new ObjectId(req.params.id) });
+    if (!docs) return res.status(404).json({ erreur: "Documents introuvables" });
+    res.json({ pieceIdentite: docs.pieceIdentite, selfie: docs.selfie });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de récupérer les documents" });
   }
 });
 
