@@ -949,6 +949,11 @@ app.patch("/candidatures/commerces/:id", async (req, res) => {
   }
 });
 // ---------- Connexion des commerces ----------
+// Retire espaces, points et tirets d'un numéro pour comparer correctement
+function normaliserTelephone(t) {
+  return String(t || "").replace(/[\s.\-()]/g, "");
+}
+
 app.post("/commerce/connexion", async (req, res) => {
   try {
     const { telephone, motDePasse } = req.body;
@@ -957,32 +962,48 @@ app.post("/commerce/connexion", async (req, res) => {
       return res.status(400).json({ erreur: "Téléphone et mot de passe sont obligatoires." });
     }
 
-    const candidature = await db.collection("candidatures_commerces").findOne({ telephone: telephone.trim() });
-    if (!candidature || !candidature.motDePasse) {
+    const tel = normaliserTelephone(telephone);
+    const candidatures = await db.collection("candidatures_commerces")
+      .find({ motDePasse: { $exists: true } })
+      .toArray();
+    const memeNumero = candidatures.filter(function (c) {
+      return normaliserTelephone(c.telephone) === tel;
+    });
+
+    if (memeNumero.length === 0) {
+      console.log("Connexion commerce refusée : aucune candidature avec mot de passe pour ce numéro");
       return res.status(401).json({ erreur: "Téléphone ou mot de passe incorrect." });
     }
 
-    const motDePasseValide = await bcrypt.compare(motDePasse, candidature.motDePasse);
-    if (!motDePasseValide) {
-      return res.status(401).json({ erreur: "Téléphone ou mot de passe incorrect." });
+    let nonValide = false;
+    for (const candidature of memeNumero) {
+      const ok = await bcrypt.compare(motDePasse, candidature.motDePasse);
+      if (!ok) continue;
+
+      if (candidature.statut !== "valide") {
+        nonValide = true;
+        continue;
+      }
+
+      const commerce = await db.collection("commerces").findOne({ candidatureId: candidature._id });
+      if (!commerce) {
+        return res.status(404).json({ erreur: "Commerce introuvable. Contacte Kolis." });
+      }
+
+      const token = jwt.sign(
+        { commerceId: commerce._id.toString() },
+        process.env.JWT_SECRET,
+        { expiresIn: "7d" }
+      );
+      return res.json({ message: "Connexion réussie", token, commerceId: commerce._id, nom: commerce.nom });
     }
 
-    if (candidature.statut !== "valide") {
+    if (nonValide) {
       return res.status(403).json({ erreur: "Ta candidature n'est pas encore validée par Kolis." });
     }
 
-    const commerce = await db.collection("commerces").findOne({ candidatureId: candidature._id });
-    if (!commerce) {
-      return res.status(404).json({ erreur: "Commerce introuvable. Contacte Kolis." });
-    }
-
-    const token = jwt.sign(
-      { commerceId: commerce._id.toString() },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-
-    res.json({ message: "Connexion réussie", token, commerceId: commerce._id, nom: commerce.nom });
+    console.log("Connexion commerce refusée : mot de passe incorrect");
+    res.status(401).json({ erreur: "Téléphone ou mot de passe incorrect." });
   } catch (error) {
     console.error("Erreur connexion commerce :", error);
     res.status(500).json({ erreur: "Impossible de se connecter" });
