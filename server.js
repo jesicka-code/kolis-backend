@@ -275,7 +275,7 @@ app.get("/commerce/commandes", verifierCommerce, async (req, res) => {
     if (!commerce) return res.status(404).json({ erreur: "Commerce introuvable" });
 
     const commandes = await db.collection("commandes")
-      .find({ commerceNom: commerce.nom })
+      .find({ commerceNom: commerce.nom }, { projection: { clientTelephone: 0 } })
       .sort({ dateCreation: -1 })
       .toArray();
     res.json(commandes);
@@ -381,7 +381,13 @@ app.get("/calculer-livraison", (req, res) => {
 // ---------- Commandes ----------
  app.post("/commandes", async (req, res) => {
   try {
-    let { commerceId, commerceNom, articles, latClient, lonClient, adresseLivraison, modePaiement, montantRemis } = req.body;
+  let { commerceId, commerceNom, articles, latClient, lonClient, adresseLivraison, modePaiement, montantRemis, clientNom, clientTelephone } = req.body;
+
+    const nomClient = nettoyerTexte(clientNom).slice(0, 80);
+    const telephoneClient = String(clientTelephone || "").replace(/[\s.\-()]/g, "");
+    if (nomClient.length < 2 || !/^\+?\d{8,15}$/.test(telephoneClient)) {
+      return res.status(400).json({ erreur: "Le nom et un numéro de téléphone valide sont obligatoires." });
+    }
 
     if (!articles || articles.length === 0) {
       return res.status(400).json({ erreur: "La commande doit contenir au moins un article." });
@@ -448,6 +454,8 @@ app.get("/calculer-livraison", (req, res) => {
     }
 
     const commande = {
+      clientNom: nomClient,
+      clientTelephone: telephoneClient,
       commerceId,
       commerceNom,
       articles,
@@ -487,7 +495,7 @@ app.get("/calculer-livraison", (req, res) => {
 
 app.get("/commandes/disponibles", async (req, res) => {
   try {
-    const commandes = await db.collection("commandes").find({ statut: "prete" }).toArray();
+    const commandes = await db.collection("commandes").find({ statut: "prete" }, { projection: { clientTelephone: 0, clientNom: 0 } }).toArray();
     res.json(commandes);
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de récupérer les commandes disponibles" });
@@ -506,7 +514,7 @@ app.get("/commandes/especes", async (req, res) => {
   }
 });
 
-app.get("/commandes/:id", async (req, res) => {
+", async (req, res) => {
   try {
     const commande = await db.collection("commandes").findOne({ _id: new ObjectId(req.params.id) });
     if (!commande) return res.status(404).json({ erreur: "Commande introuvable" });
@@ -516,20 +524,16 @@ app.get("/commandes/:id", async (req, res) => {
   }
 });
 
-app.patch("/commandes/:id", async (req, res) => {
+app.get("/commandes/:id", async (req, res) => {
   try {
-    const { statut, livreurNom } = req.body;
-    const misAJour = {};
-    if (statut) misAJour.statut = statut;
-    if (livreurNom) misAJour.livreurNom = livreurNom;
-
-    await db.collection("commandes").updateOne(
+    const commande = await db.collection("commandes").findOne(
       { _id: new ObjectId(req.params.id) },
-      { $set: misAJour }
+      { projection: { clientTelephone: 0, clientNom: 0 } }
     );
-    res.json({ message: "Commande mise à jour" });
+    if (!commande) return res.status(404).json({ erreur: "Commande introuvable" });
+    res.json(commande);
   } catch (error) {
-    res.status(500).json({ erreur: "Impossible de mettre à jour la commande" });
+    res.status(500).json({ erreur: "Impossible de récupérer la commande" });
   }
 });
 
@@ -1087,7 +1091,7 @@ app.get("/livreur/commandes-disponibles", verifierLivreur, async (req, res) => {
     const livreur = await trouverLivreur(req);
     if (!livreur) return res.status(401).json({ erreur: "Connexion requise" });
 
-    const commandes = await db.collection("commandes").find({ statut: "prete" }).toArray();
+    const commandes = await db.collection("commandes").find({ statut: "prete" }, { projection: { clientTelephone: 0, clientNom: 0 } }).toArray();
     res.json(commandes);
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de récupérer les commandes" });
@@ -1198,6 +1202,24 @@ app.get("/candidatures/livreurs/:id/documents", verifierAdmin, async (req, res) 
     res.json({ pieceIdentite: docs.pieceIdentite, selfie: docs.selfie });
   } catch (error) {
     res.status(500).json({ erreur: "Impossible de récupérer les documents" });
+  }
+});
+// Contact du client : seulement pour le livreur qui a pris la commande, pendant la livraison
+app.get("/livreur/commandes/:id/client", verifierLivreur, async (req, res) => {
+  try {
+    const livreur = await trouverLivreur(req);
+    if (!livreur) return res.status(401).json({ erreur: "Connexion requise" });
+
+    const commande = await db.collection("commandes").findOne({
+      _id: new ObjectId(req.params.id),
+      livreurId: livreur._id,
+      statut: { $in: ["recuperee", "en_livraison", "arrivee"] },
+    });
+    if (!commande) return res.status(404).json({ erreur: "Commande introuvable" });
+
+    res.json({ nom: commande.clientNom || "", telephone: commande.clientTelephone || "" });
+  } catch (error) {
+    res.status(500).json({ erreur: "Impossible de récupérer le contact" });
   }
 });
 
