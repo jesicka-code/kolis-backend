@@ -514,16 +514,6 @@ app.get("/commandes/especes", async (req, res) => {
   }
 });
 
-", async (req, res) => {
-  try {
-    const commande = await db.collection("commandes").findOne({ _id: new ObjectId(req.params.id) });
-    if (!commande) return res.status(404).json({ erreur: "Commande introuvable" });
-    res.json(commande);
-  } catch (error) {
-    res.status(500).json({ erreur: "Impossible de récupérer la commande" });
-  }
-});
-
 app.get("/commandes/:id", async (req, res) => {
   try {
     const commande = await db.collection("commandes").findOne(
