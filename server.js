@@ -1136,6 +1136,13 @@ app.patch("/livreur/commandes/:id/etape", verifierLivreur, async (req, res) => {
 
     const resultat = await db.collection("commandes").updateOne(filtre, { $set: modifs });
     if (resultat.matchedCount === 0) {
+      // Déjà à cette étape pour ce livreur (double appui, page pas à jour) : on considère que c'est fait
+      const dejaFait = await db.collection("commandes").findOne({
+        _id: new ObjectId(req.params.id),
+        statut: statut,
+        livreurId: livreur._id,
+      });
+      if (dejaFait) return res.json({ message: "Déjà à jour" });
       return res.status(409).json({ erreur: "Cette commande n'est plus disponible ou a déjà été prise." });
     }
     res.json({ message: "Commande mise à jour" });
